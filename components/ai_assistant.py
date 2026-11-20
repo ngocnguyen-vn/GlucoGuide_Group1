@@ -18,7 +18,7 @@ def _clean_for_speech(text: str) -> str:
     return t.strip()
 
 
-def _render_tts_button(text: str, lang_code: str, unique_id: str):
+def _render_tts_button(text: str, lang_code: str, unique_id: str, auto_play: bool = False):
     clean_text = _clean_for_speech(text)
     if not clean_text:
         return
@@ -126,6 +126,10 @@ def _render_tts_button(text: str, lang_code: str, unique_id: str):
     }}
     </script>
     """
+    # Auto-play: thêm script tự gọi speak sau 750ms (đủ thời gian browser load voices)
+    if auto_play:
+        auto_script = f"<script>setTimeout(function(){{speak_{unique_id}();}}, 750);</script>"
+        html_code = html_code + auto_script
     components.html(html_code, height=36)
 
 
@@ -347,18 +351,94 @@ def render_floating_ai_assistant(context: dict):
                     selected_prompt = chip_text
 
             user_query = st.chat_input(placeholder=tr("Nhập câu hỏi của bạn...", "Ask about your result..."), key="fab_chat_input")
+
+            # ── Voice Recognition Button ──────────────────────────────────
+            mic_label     = tr("🎤 Nói chuyện với AI", "🎤 Speak to AI")
+            listening_lbl = tr("⏹ Đang nghe...", "⏹ Listening...")
+            no_support    = tr("Trình duyệt không hỗ trợ nhận dạng giọng nói.", "Your browser does not support speech recognition.")
+            speech_lang   = "vi-VN" if cur_l == "vi" else "en-US"
+            components.html(f"""
+            <div style="margin:4px 0 0 0;display:flex;justify-content:center;">
+              <button id="voiceBtn" onclick="toggleVoice()" style="
+                background:#EFF6FF;border:1.5px solid #BFDBFE;color:#1E40AF;
+                border-radius:20px;padding:6px 18px;font-size:12.5px;font-weight:700;
+                cursor:pointer;display:inline-flex;align-items:center;gap:7px;
+                font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+                transition:all 0.2s ease;width:auto;">
+                {mic_label}
+              </button>
+            </div>
+            <div id="voiceStatus" style="text-align:center;font-size:11px;color:#64748B;min-height:16px;margin-top:3px;"></div>
+            <script>
+            let _recog = null;
+            let _listening = false;
+            function toggleVoice() {{
+              if (!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {{
+                document.getElementById('voiceStatus').innerText = {repr(no_support)};
+                return;
+              }}
+              if (_listening && _recog) {{
+                _recog.stop();
+                return;
+              }}
+              const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+              _recog = new SRClass();
+              _recog.lang = '{speech_lang}';
+              _recog.interimResults = false;
+              _recog.maxAlternatives = 1;
+              _listening = true;
+              const btn = document.getElementById('voiceBtn');
+              const status = document.getElementById('voiceStatus');
+              btn.innerText = {repr(listening_lbl)};
+              btn.style.background = '#FEF2F2';
+              btn.style.borderColor = '#FCA5A5';
+              btn.style.color = '#DC2626';
+              status.innerText = '🔴 ' + ('{speech_lang}' === 'vi-VN' ? 'Hãy nói...' : 'Listening...');
+
+              _recog.onresult = function(e) {{
+                const transcript = e.results[0][0].transcript;
+                // Inject into Streamlit chat input using React fiber
+                const chatInput = window.parent.document.querySelector('[data-testid="stChatInputTextArea"], textarea[aria-label], .stChatInput textarea');
+                if (chatInput) {{
+                  const nativeInput = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+                  nativeInput.set.call(chatInput, transcript);
+                  chatInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                  setTimeout(() => {{
+                    chatInput.dispatchEvent(new KeyboardEvent('keydown', {{ key:'Enter', code:'Enter', keyCode:13, bubbles:true }}));
+                  }}, 300);
+                }}
+                status.innerText = '✅ "' + transcript + '"';
+              }};
+              _recog.onerror = function(e) {{
+                status.innerText = '⚠️ ' + e.error;
+              }};
+              _recog.onend = function() {{
+                _listening = false;
+                btn.innerText = {repr(mic_label)};
+                btn.style.background = '#EFF6FF';
+                btn.style.borderColor = '#BFDBFE';
+                btn.style.color = '#1E40AF';
+                setTimeout(() => {{ status.innerText = ''; }}, 3000);
+              }};
+              _recog.start();
+            }}
+            </script>
+            """, height=70)
+            # ─────────────────────────────────────────────────────────────
             prompt_to_process = selected_prompt or user_query
             if prompt_to_process:
                 st.session_state["chat_messages"].append({"role": "user", "content": prompt_to_process})
                 reply = generate_ai_response(prompt_to_process, st.session_state["chat_messages"][:-1], context, current_lang=cur_l)
                 st.session_state["chat_messages"].append({"role": "assistant", "content": reply})
+                st.session_state["auto_speak_idx"] = len(st.session_state["chat_messages"]) - 1
 
             with chat_box:
                 assistant_avatar = doc_uri if doc_uri else None
+                auto_idx = st.session_state.pop("auto_speak_idx", -1)
                 for idx, msg in enumerate(st.session_state["chat_messages"]):
                     with st.chat_message(msg["role"], avatar=(assistant_avatar if msg["role"] == "assistant" else None)):
                         st.markdown(msg["content"])
                         if msg["role"] == "assistant":
-                            _render_tts_button(msg["content"], cur_l, f"tts_{idx}")
+                            _render_tts_button(msg["content"], cur_l, f"tts_{idx}", auto_play=(idx == auto_idx))
 
             st.caption(tr("Thông tin chỉ phục vụ mục đích giáo dục, không thay thế chẩn đoán của bác sĩ.", "Educational information only; does not replace professional medical advice."))
